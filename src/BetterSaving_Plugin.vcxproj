@@ -42,7 +42,6 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-
   <!-- ===== Client Debug ===== -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Client Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -103,14 +102,12 @@
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
-
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="Shared">
     <Import Project="$(SolutionDir)Shared.props" />
   </ImportGroup>
-
   <!-- User property sheets for all configurations -->
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Client Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -136,16 +133,13 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Local SDK Server Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-
   <PropertyGroup Label="UserMacros" />
-
   <!-- Output directories — all configs write to build\<Configuration>\Plugins\ -->
   <PropertyGroup>
     <OutDir>$(SolutionDir)build\$(Configuration)\Plugins\</OutDir>
     <IntDir>$(SolutionDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
     <TargetExt>.dll</TargetExt>
   </PropertyGroup>
-
   <!-- ===== Client Debug compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Client Debug|x64'">
     <ClCompile>
@@ -163,7 +157,6 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <!-- ===== Client Release compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Client Release|x64'">
     <ClCompile>
@@ -186,7 +179,6 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <!-- ===== Local SDK Client Debug compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Local SDK Client Debug|x64'">
     <ClCompile>
@@ -204,7 +196,6 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <!-- ===== Local SDK Client Release compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Local SDK Client Release|x64'">
     <ClCompile>
@@ -227,7 +218,6 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <!-- ===== Server Debug compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Server Debug|x64'">
     <ClCompile>
@@ -245,7 +235,6 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <!-- ===== Server Release compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Server Release|x64'">
     <ClCompile>
@@ -268,7 +257,6 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <!-- ===== Local SDK Server Debug compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Local SDK Server Debug|x64'">
     <ClCompile>
@@ -286,7 +274,6 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <!-- ===== Local SDK Server Release compile/link ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Local SDK Server Release|x64'">
     <ClCompile>
@@ -309,8 +296,8 @@
       <EnableUAC>false</EnableUAC>
     </Link>
   </ItemDefinitionGroup>
-
   <ItemGroup>
+    <ClInclude Include="miniz.h" />
     <ClInclude Include="plugin.h" />
     <ClInclude Include="plugin_config.h" />
     <ClInclude Include="plugin_helpers.h" />
@@ -324,6 +311,7 @@
     <ClCompile Include="$(StarRuptureSDKSourceDir)Engine_functions.cpp" />
     <ClCompile Include="$(StarRuptureSDKSourceDir)Chimera_functions.cpp" />
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="miniz.c" />
     <ClCompile Include="plugin.cpp" />
     <ClCompile Include="plugin_config.cpp" />
     <ClCompile Include="save_hook.cpp" />

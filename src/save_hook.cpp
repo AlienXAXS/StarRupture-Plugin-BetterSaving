@@ -5,6 +5,7 @@
 #include "plugin_config.h"
 
 #include "Chimera_classes.hpp"
+#include "miniz.h"
 
 #include <windows.h>
 #include <psapi.h>
@@ -81,16 +82,6 @@ static constexpr size_t kSGI_Off_GameVersionLea   = 0x05AF; // LEA RCX, GameVers
 
 typedef void(__fastcall* SaveGameInternal_t)(void* self, FStringRaw* Name, bool bAsync);
 
-// FName / compression helpers (needed by FCompressMemory_t typedef)
-struct FNameRaw { int32_t ComparisonIndex; int32_t Number; };
-enum ECompressionFlags : int32_t { COMPRESS_None = 0, COMPRESS_BiasMemory = 0x10 };
-
-// FCompression::CompressMemory
-typedef bool(__fastcall* FCompressMemory_t)(
-	FNameRaw FormatName, void* CompBuf, int64_t* CompSize,
-	const void* UncompBuf, int64_t UncompSize,
-	ECompressionFlags Flags, uint64_t CompressionData);
-
 // FJsonObjectConverter::UStructToJsonObjectString
 typedef bool(__fastcall* UStructToJsonString_t)(
 	void* ScriptStruct, const void* StructPtr,
@@ -159,8 +150,6 @@ static HookHandle            g_hookHandle          = nullptr;
 static SaveGameInternal_t    g_originalSGI         = nullptr;
 static std::atomic<bool>     g_saveInProgress      { false };
 
-static FCompressMemory_t     g_compressMemory      = nullptr;
-static std::atomic<int32_t>  g_compressFNameIndex  { 0 };
 static UStructToJsonString_t g_uStructToJson          = nullptr;
 static StaticStruct_t        g_crSaveDataStaticStruct  = nullptr;
 static FStringRaw*           g_cloudSaveFolder         = nullptr;
@@ -289,22 +278,22 @@ static void RunSaveTask(SaveTask task)
 		jsonSucceeded = true;
 
 		// ------------------------------------------------------------------
-		// Step 2: Compress
+		// Step 2: Compress (zlib via miniz)
 		// ------------------------------------------------------------------
 
-		const int32_t uncompSize  = static_cast<int32_t>(jsonUtf8.size());
-		const int64_t bound       = static_cast<int64_t>(jsonUtf8.size() + jsonUtf8.size() / 10 + 64);
-		std::vector<uint8_t> compressed(static_cast<size_t>(bound));
-		int64_t compressedSize = bound;
+		const int32_t uncompSize = static_cast<int32_t>(jsonUtf8.size());
+		mz_ulong compressedSize  = mz_compressBound(static_cast<mz_ulong>(jsonUtf8.size()));
+		std::vector<uint8_t> compressed(static_cast<size_t>(compressedSize));
 
-		const FNameRaw fmtName = { g_compressFNameIndex.load(std::memory_order_relaxed), 0 };
-
-		if (!g_compressMemory(fmtName,
+		const int mzResult = mz_compress2(
 			compressed.data(), &compressedSize,
-			jsonUtf8.data(), static_cast<int64_t>(jsonUtf8.size()),
-			COMPRESS_BiasMemory, 0))
+			reinterpret_cast<const unsigned char*>(jsonUtf8.data()),
+			static_cast<mz_ulong>(jsonUtf8.size()),
+			MZ_DEFAULT_COMPRESSION);
+
+		if (mzResult != MZ_OK)
 		{
-			LOG_ERROR("BetterSaving: [thread] FCompression::CompressMemory failed");
+			LOG_ERROR("BetterSaving: [thread] mz_compress2 failed (%d)", mzResult);
 			goto Fail;
 		}
 
@@ -316,8 +305,8 @@ static void RunSaveTask(SaveTask task)
 		payload[3] = static_cast<uint8_t>((uncompSize >> 24) & 0xFF);
 		memcpy(payload.data() + 4, compressed.data(), static_cast<size_t>(compressedSize));
 
-		LOG_DEBUG("BetterSaving: [thread] Compressed %d → %lld bytes  payload=%zu total",
-			uncompSize, static_cast<long long>(compressedSize), payload.size());
+		LOG_DEBUG("BetterSaving: [thread] Compressed %d → %lu bytes  payload=%zu total",
+			uncompSize, compressedSize, payload.size());
 
 		// ------------------------------------------------------------------
 		// Step 3: Steam write
@@ -659,21 +648,6 @@ static void InitFunctionPointers(uintptr_t sgiBase)
 	LOG_INFO("BetterSaving: GameVersion static    at 0x%llX", static_cast<unsigned long long>(g_gameVersionAddr));
 }
 
-static void InitCompression()
-{
-	auto* self = GetSelf();
-	if (!self) return;
-
-	static const char* kPattern =
-		"48 89 5C 24 ?? 48 89 6C 24 ?? 56 57 41 54 41 56 41 57 "
-		"48 81 EC ?? ?? ?? ?? 48 8B D9 49 8B E9";
-
-	const uintptr_t addr = self->scanner->FindPatternInMainModule(kPattern);
-	if (!addr) { LOG_ERROR("BetterSaving: FCompression::CompressMemory not found"); return; }
-	g_compressMemory = reinterpret_cast<FCompressMemory_t>(addr);
-	LOG_INFO("BetterSaving: FCompression::CompressMemory at 0x%llX", static_cast<unsigned long long>(addr));
-}
-
 // WUF body offset of the LEA RCX that loads s_CallbackCounterAndContext
 // (0x14774DD0D - 0x14774D710 = 0x5FD)
 static constexpr size_t kWUF_Off_SteamContext = 0x5FD;
@@ -773,9 +747,6 @@ namespace SaveHook
 		auto* self = GetSelf();
 		if (!self) { LOG_ERROR("BetterSaving: GetSelf() null"); return false; }
 
-		InitCompression();
-		if (!g_compressMemory) { LOG_ERROR("BetterSaving: FCompression::CompressMemory required"); return false; }
-
 		// Locate WriteUserFile for CloudSaveFolder + Steam context
 		static const char* kWritePattern =
 			"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 "
@@ -796,9 +767,6 @@ namespace SaveHook
 			LOG_ERROR("BetterSaving: Steam context not resolved — cannot write saves");
 			return false;
 		}
-
-		// Set compression FName index (captured value)
-		g_compressFNameIndex.store(1071, std::memory_order_relaxed);
 
 		// Locate SaveGameInternal and hook it
 		static const char* kSGIPattern =
