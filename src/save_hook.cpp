@@ -224,7 +224,7 @@ static void UEFree(void* ptr)
 
 static void RunSaveTask(SaveTask task)
 {
-	LOG_DEBUG("BetterSaving: [thread] RunSaveTask — slot='%ls'", task.slotName.c_str());
+	LOG_INFO("BetterSaving: [1/4] Starting save — slot='%ls'", task.slotName.c_str());
 
 	bool jsonSucceeded = false;
 
@@ -232,16 +232,19 @@ static void RunSaveTask(SaveTask task)
 	// Step 1: JSON serialisation
 	// ------------------------------------------------------------------
 
-	SaveWidget::SetStage(SaveStage::Compressing); // stage reused for "Serialising"
+	SaveWidget::SetStage(SaveStage::Compressing);
 
+	LOG_INFO("BetterSaving: [1/4] Fetching FCrSaveGameData::StaticStruct...");
 	void* scriptStruct = g_crSaveDataStaticStruct();
 	if (!scriptStruct)
 	{
-		LOG_ERROR("BetterSaving: [thread] FCrSaveGameData::StaticStruct() returned null");
+		LOG_ERROR("BetterSaving: [1/4] FAILED — FCrSaveGameData::StaticStruct() returned null");
 		goto Fail;
 	}
+	LOG_INFO("BetterSaving: [1/4] StaticStruct OK (0x%p)", scriptStruct);
 
 	{
+		LOG_INFO("BetterSaving: [1/4] Serialising save data to JSON...");
 		FStringRaw jsonStr{};
 		const bool jsonOk = g_uStructToJson(
 			scriptStruct,
@@ -254,32 +257,44 @@ static void RunSaveTask(SaveTask task)
 
 		if (!jsonOk || !jsonStr.chars.data || jsonStr.chars.arrayNum <= 1)
 		{
-			LOG_ERROR("BetterSaving: [thread] UStructToJsonObjectString failed (ok=%d arrayNum=%d)",
+			LOG_ERROR("BetterSaving: [1/4] FAILED — UStructToJsonObjectString returned ok=%d arrayNum=%d",
 				static_cast<int>(jsonOk), jsonStr.chars.arrayNum);
 			UEFree(jsonStr.chars.data);
-			// Matches original: OnAfterSave/SaveLastName skipped on JSON failure
 			goto FailNoPost;
 		}
+		LOG_INFO("BetterSaving: [1/4] JSON serialisation OK — %d wchars", jsonStr.chars.arrayNum - 1);
 
 		const int wideLen = jsonStr.chars.arrayNum - 1;
 		const std::string jsonUtf8 = WideToUtf8(
 			static_cast<const wchar_t*>(jsonStr.chars.data), wideLen);
 		UEFree(jsonStr.chars.data);
 
-		LOG_DEBUG("BetterSaving: [thread] JSON %d wchars → %zu UTF-8 bytes",
-			wideLen, jsonUtf8.size());
-
 		if (jsonUtf8.empty())
 		{
-			LOG_ERROR("BetterSaving: [thread] UTF-8 conversion produced empty string");
+			LOG_ERROR("BetterSaving: [1/4] FAILED — UTF-8 conversion produced empty string");
 			goto FailNoPost;
 		}
+		LOG_INFO("BetterSaving: [1/4] UTF-8 conversion OK — %zu bytes", jsonUtf8.size());
+
+		// Sanity-check: valid JSON must start with '{'
+		if (jsonUtf8[0] != '{')
+		{
+			LOG_ERROR("BetterSaving: [1/4] FAILED — JSON sanity check: first byte is 0x%02X ('%c'), expected '{'. Aborting to avoid corrupt save.",
+				static_cast<unsigned char>(jsonUtf8[0]),
+				jsonUtf8[0] >= 0x20 ? jsonUtf8[0] : '?');
+			goto FailNoPost;
+		}
+		LOG_INFO("BetterSaving: [1/4] JSON sanity check OK — first='%c' last='%c'",
+			jsonUtf8.front(),
+			jsonUtf8.back() >= 0x20 ? jsonUtf8.back() : '?');
 
 		jsonSucceeded = true;
 
 		// ------------------------------------------------------------------
 		// Step 2: Compress (zlib via miniz)
 		// ------------------------------------------------------------------
+
+		LOG_INFO("BetterSaving: [2/4] Compressing %zu bytes...", jsonUtf8.size());
 
 		const int32_t uncompSize = static_cast<int32_t>(jsonUtf8.size());
 		mz_ulong compressedSize  = mz_compressBound(static_cast<mz_ulong>(jsonUtf8.size()));
@@ -293,9 +308,21 @@ static void RunSaveTask(SaveTask task)
 
 		if (mzResult != MZ_OK)
 		{
-			LOG_ERROR("BetterSaving: [thread] mz_compress2 failed (%d)", mzResult);
+			LOG_ERROR("BetterSaving: [2/4] FAILED — mz_compress2 returned %d", mzResult);
 			goto Fail;
 		}
+
+		// Sanity-check: zlib streams always start with 0x78
+		if (compressedSize < 2 || compressed[0] != 0x78)
+		{
+			LOG_ERROR("BetterSaving: [2/4] FAILED — zlib header sanity check: expected 0x78, got 0x%02X (compressedSize=%lu)",
+				compressed[0], compressedSize);
+			goto Fail;
+		}
+		LOG_INFO("BetterSaving: [2/4] Compression OK — %d → %lu bytes (%.2fx) zlib header=0x%02X%02X",
+			uncompSize, compressedSize,
+			static_cast<double>(uncompSize) / static_cast<double>(compressedSize),
+			compressed[0], compressed[1]);
 
 		// Payload: 4-byte LE uncompressed size + compressed data
 		std::vector<uint8_t> payload(4 + static_cast<size_t>(compressedSize));
@@ -305,32 +332,31 @@ static void RunSaveTask(SaveTask task)
 		payload[3] = static_cast<uint8_t>((uncompSize >> 24) & 0xFF);
 		memcpy(payload.data() + 4, compressed.data(), static_cast<size_t>(compressedSize));
 
-		LOG_DEBUG("BetterSaving: [thread] Compressed %d → %lu bytes  payload=%zu total",
-			uncompSize, compressedSize, payload.size());
+		LOG_INFO("BetterSaving: [2/4] Payload built — %zu bytes total (4-byte header + %lu compressed)",
+			payload.size(), compressedSize);
 
 		// ------------------------------------------------------------------
 		// Step 3: Steam write
-		// Mirrors WriteUserFile's Steam branch exactly:
-		//   1. FileWrite(path, uncompressed_utf8_bytes)   — synchronous
-		//   2. FileWrite(path, compressed_payload)        — synchronous
-		// Both go to the same path; the compressed write is the final state.
 		// ------------------------------------------------------------------
 
 		SaveWidget::SetStage(SaveStage::Writing);
 
+		LOG_INFO("BetterSaving: [3/4] Checking CloudSaveFolder...");
 		if (!g_cloudSaveFolder || !g_cloudSaveFolder->chars.data || g_cloudSaveFolder->chars.arrayNum <= 1)
 		{
-			LOG_ERROR("BetterSaving: [thread] CloudSaveFolder not readable");
+			LOG_ERROR("BetterSaving: [3/4] FAILED — CloudSaveFolder not readable");
 			goto Fail;
 		}
 
 		{
+			LOG_INFO("BetterSaving: [3/4] Acquiring ISteamRemoteStorage...");
 			ISteamRemoteStorage_Minimal* steam = GetSteamStorage();
 			if (!steam)
 			{
-				LOG_ERROR("BetterSaving: [thread] ISteamRemoteStorage not available");
+				LOG_ERROR("BetterSaving: [3/4] FAILED — ISteamRemoteStorage not available");
 				goto Fail;
 			}
+			LOG_INFO("BetterSaving: [3/4] ISteamRemoteStorage OK (0x%p)", static_cast<void*>(steam));
 
 			const int folderLen = g_cloudSaveFolder->chars.arrayNum - 1;
 			const std::string folderUtf8 = WideToUtf8(
@@ -339,37 +365,24 @@ static void RunSaveTask(SaveTask task)
 				static_cast<int>(task.slotName.size()));
 			const std::string steamPath = folderUtf8 + slotUtf8 + ".sav";
 
-			// --- Write 1: uncompressed UTF-8 bytes (sync) ---
-			if (jsonUtf8.size() > static_cast<size_t>((std::numeric_limits<int32_t>::max)()))
-			{
-				LOG_ERROR("BetterSaving: [thread] JSON too large for FileWrite (%zu bytes)", jsonUtf8.size());
-				goto Fail;
-			}
-			LOG_DEBUG("BetterSaving: [thread] FileWrite uncompressed %zu bytes → '%s'",
-				jsonUtf8.size(), steamPath.c_str());
-			steam->vtable->FileWrite(steam, steamPath.c_str(),
-				jsonUtf8.data(), static_cast<int32_t>(jsonUtf8.size()));
-			// Intentionally not checking return — matches game behaviour (overwritten immediately)
-
-			// --- Write 2: compressed payload (sync) ---
 			if (payload.size() > static_cast<size_t>((std::numeric_limits<int32_t>::max)()))
 			{
-				LOG_ERROR("BetterSaving: [thread] Payload too large (%zu bytes)", payload.size());
+				LOG_ERROR("BetterSaving: [3/4] FAILED — Payload too large (%zu bytes)", payload.size());
 				goto Fail;
 			}
-			LOG_INFO("BetterSaving: [thread] FileWrite compressed %zu bytes → '%s'",
-				payload.size(), steamPath.c_str());
 
+			LOG_INFO("BetterSaving: [3/4] FileWrite → '%s' (%zu bytes)...", steamPath.c_str(), payload.size());
 			const bool writeOk = steam->vtable->FileWrite(steam, steamPath.c_str(),
 				payload.data(), static_cast<int32_t>(payload.size()));
 
 			if (!writeOk)
 			{
-				LOG_ERROR("BetterSaving: [thread] ISteamRemoteStorage::FileWrite (compressed) failed");
+				LOG_ERROR("BetterSaving: [3/4] FAILED — ISteamRemoteStorage::FileWrite returned false for '%s' (%zu bytes). Steam quota or file count limit may have been reached.",
+					steamPath.c_str(), payload.size());
 				goto Fail;
 			}
 
-			LOG_INFO("BetterSaving: [thread] Steam write complete — '%s'", steamPath.c_str());
+			LOG_INFO("BetterSaving: [3/4] FileWrite OK — '%s' (%zu bytes written)", steamPath.c_str(), payload.size());
 		}
 	}
 
@@ -377,6 +390,7 @@ static void RunSaveTask(SaveTask task)
 	// Post-save: SaveLastSaveGameName
 	// (OnAfterSave skipped — FNotThreadSafeDelegateMode; TODO: game-thread marshal)
 	// ------------------------------------------------------------------
+	LOG_INFO("BetterSaving: [4/4] Calling SaveLastSaveGameName — slot='%ls'", task.slotName.c_str());
 	if (g_saveLastSaveGameName && !task.slotName.empty())
 	{
 		const size_t wlen = task.slotName.size();
@@ -389,25 +403,36 @@ static void RunSaveTask(SaveTask task)
 			nameStr.chars.arrayNum = static_cast<int32_t>(wlen + 1);
 			nameStr.chars.arrayMax = static_cast<int32_t>(wlen + 1);
 			g_saveLastSaveGameName(&nameStr);
-			// SaveLastSaveGameName reads but does not own the buffer
 			if (nameStr.chars.data) HeapFree(GetProcessHeap(), 0, nameStr.chars.data);
+			LOG_INFO("BetterSaving: [4/4] SaveLastSaveGameName OK");
+		}
+		else
+		{
+			LOG_WARN("BetterSaving: [4/4] HeapAlloc failed — SaveLastSaveGameName skipped");
 		}
 	}
+	else
+	{
+		LOG_WARN("BetterSaving: [4/4] SaveLastSaveGameName skipped — fn=0x%p slotEmpty=%d",
+			reinterpret_cast<void*>(g_saveLastSaveGameName),
+			static_cast<int>(task.slotName.empty()));
+	}
 
+	LOG_INFO("BetterSaving: Save complete — slot='%ls'", task.slotName.c_str());
 	SaveWidget::SetStage(SaveStage::Done);
 	Sleep(2000);
 	SaveWidget::SetStage(SaveStage::Idle);
 	g_saveInProgress.store(false, std::memory_order_release);
-	LOG_DEBUG("BetterSaving: [thread] RunSaveTask finished");
 	return;
 
 Fail:
+	LOG_ERROR("BetterSaving: Save FAILED — slot='%ls'", task.slotName.c_str());
 	SaveWidget::SetStage(SaveStage::Failed);
 	Sleep(2000);
 	SaveWidget::SetStage(SaveStage::Idle);
 FailNoPost:
 	g_saveInProgress.store(false, std::memory_order_release);
-	LOG_DEBUG("BetterSaving: [thread] RunSaveTask aborted");
+	LOG_ERROR("BetterSaving: Save aborted (no post-save) — slot='%ls'", task.slotName.c_str());
 }
 
 // ==========================================================================
@@ -418,11 +443,16 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 {
 	LOG_TRACE("BetterSaving: Detour_SaveGameInternal — self=0x%p bAsync=%d", self, static_cast<int>(bAsync));
 
+	// If a save is already in progress, drop this request immediately.
+	// Do NOT fall back to g_originalSGI — it writes raw uncompressed JSON
+	// which the game can no longer decompress. Do NOT block the game thread.
 	bool expected = false;
 	if (!g_saveInProgress.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
 	{
-		LOG_WARN("BetterSaving: Save already in progress — falling back to original");
-		g_originalSGI(self, Name, bAsync);
+		LOG_WARN("BetterSaving: Save already in progress — dropping duplicate request for slot='%ls'",
+			(Name && Name->chars.data && Name->chars.arrayNum > 1)
+				? static_cast<const wchar_t*>(Name->chars.data)
+				: L"(unknown)");
 		return;
 	}
 
