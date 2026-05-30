@@ -137,13 +137,13 @@ jobs:
           description: "Changelog: https://github.com/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.TAG }}"
           version: ${{ steps.tag.outputs.NEXUS_VERSION }}
 
-      - name: Upload Server build to Nexus Mods
-        uses: Nexus-Mods/upload-action@main
-        with:
-          api_key: ${{ secrets.NEXUS_APIKEY }}
-          file_group_id: ${{ secrets.NEXUS_SERVER_GROUP_ID }}
-          filename: ${{ github.workspace }}\BetterSaving-Server-${{ steps.tag.outputs.TAG }}.zip
-          archive_existing_file: true
-          display_name: "BetterSaving Server ${{ steps.tag.outputs.TAG }}"
-          description: "Changelog: https://github.com/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.TAG }}"
-          version: ${{ steps.tag.outputs.NEXUS_VERSION }}
+#      - name: Upload Server build to Nexus Mods
+#        uses: Nexus-Mods/upload-action@main
+#        with:
+#          api_key: ${{ secrets.NEXUS_APIKEY }}
+#          file_group_id: ${{ secrets.NEXUS_SERVER_GROUP_ID }}
+#          filename: ${{ github.workspace }}\BetterSaving-Server-${{ steps.tag.outputs.TAG }}.zip
+#          archive_existing_file: true
+#          display_name: "BetterSaving Server ${{ steps.tag.outputs.TAG }}"
+#          description: "Changelog: https://github.com/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.TAG }}"
+#          version: ${{ steps.tag.outputs.NEXUS_VERSION }}
