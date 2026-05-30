@@ -21,7 +21,12 @@ static PluginInfo s_pluginInfo = {
 #else
 	"Server-side async saving",
 #endif
-	PLUGIN_INTERFACE_VERSION
+	PLUGIN_INTERFACE_VERSION,
+#ifdef MODLOADER_CLIENT_BUILD
+	PLUGIN_TARGET_CLIENT
+#else
+	PLUGIN_TARGET_SERVER
+#endif
 };
 
 // ---------------------------------------------------------------------------
