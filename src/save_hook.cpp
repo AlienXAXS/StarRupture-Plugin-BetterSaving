@@ -36,15 +36,12 @@ static constexpr ptrdiff_t kSaveDataOffset = 0x30;
 
 // ==========================================================================
 // UCrSaveSubsystem field offsets  (all relative to the 'this' pointer)
-// Derived from IDA assembly listing of SaveGameInternal @ 0x1475B9D60.
+// Derived from IDA assembly listing of SaveGameInternal @ 0x1475C4AF0.
 // ==========================================================================
 
 // Delegate fields
-static constexpr ptrdiff_t kOnPreSaveStartOffset = 0x110; // lea rcx,[rsi+110h]
-static constexpr ptrdiff_t kOnAfterSaveOffset    = 0x188; // lea rcx,[rsi+188h]
-
-// GetWorld() vtable slot — call qword ptr [rax+180h]
-static constexpr size_t kGetWorldVtableSlot = 0x180 / 8;  // = 0x30
+static constexpr ptrdiff_t kOnPreSaveStartOffset = 0x110; // lea rcx,[r15+110h]
+static constexpr ptrdiff_t kOnAfterSaveOffset    = 0x188; // lea rcx,[r15+188h]
 
 // SaveData field offsets within UCrSaveSubsystem (= SaveData-relative + 0x30)
 static constexpr ptrdiff_t kSaveDataLevelOffset         = 0x80;  // FString Level
@@ -63,18 +60,19 @@ static constexpr ptrdiff_t kWorldRealTimeSecondsOffset     = 0x848;
 static constexpr ptrdiff_t kWorldAudioTimeSecondsOffset    = 0x850;
 
 // Offsets of specific CALL / LEA instructions within SaveGameInternal body
-// (instruction address - function base 0x1475B9D60)
-static constexpr size_t kSGI_Off_FMemoryFree      = 0x00BE; // first FMemory::Free call
-static constexpr size_t kSGI_Off_BroadcastPre     = 0x012C; // FOnFlashlightDeactivated_DelegateWrapper (OnPreSaveStart)
-static constexpr size_t kSGI_Off_GetPathName      = 0x0148; // UObjectBaseUtility::GetPathName
-static constexpr size_t kSGI_Off_AssignRange      = 0x0167; // FString::AssignRange
-static constexpr size_t kSGI_Off_DateTimeNow      = 0x01D8; // FDateTime::Now
-static constexpr size_t kSGI_Off_DateTimeToString = 0x01EC; // FDateTime::ToString
-static constexpr size_t kSGI_Off_StaticStruct     = 0x0272; // FCrSaveGameData::StaticStruct()
-static constexpr size_t kSGI_Off_UStructToJson    = 0x02A0; // FJsonObjectConverter::UStructToJsonObjectString
-static constexpr size_t kSGI_Off_WriteMetaFile    = 0x05D2; // UCrSaveGameUtils::WriteMetaFile
-static constexpr size_t kSGI_Off_SaveLastName     = 0x0642; // UCrSaveGameUtils::SaveLastSaveGameName
-static constexpr size_t kSGI_Off_GameVersionLea   = 0x05AF; // LEA RCX, GameVersion::CurrentGameVersion_0
+// (instruction address - function base 0x1475C4AF0)
+// NOTE: FMemoryFree removed — use modloader Memory->Free() instead.
+// NOTE: UStructToJson removed from SGI body — 0x359 now points to UStructToJsonObject
+//       (wrong function/ABI). UStructToJsonObjectString resolved via separate AOB scan.
+static constexpr size_t kSGI_Off_BroadcastPre     = 0x0196; // FOnFlashlightDeactivated_DelegateWrapper (OnPreSaveStart)
+static constexpr size_t kSGI_Off_GetPathName      = 0x01B1; // UObjectBaseUtility::GetPathName
+static constexpr size_t kSGI_Off_AssignRange      = 0x01CF; // FString::AssignRange
+static constexpr size_t kSGI_Off_DateTimeNow      = 0x0240; // FDateTime::Now
+static constexpr size_t kSGI_Off_DateTimeToString = 0x0254; // FDateTime::ToString
+static constexpr size_t kSGI_Off_StaticStruct     = 0x0331; // FCrSaveGameData::StaticStruct()
+static constexpr size_t kSGI_Off_WriteMetaFile    = 0x07DA; // UCrSaveGameUtils::WriteMetaFile
+static constexpr size_t kSGI_Off_SaveLastName     = 0x0848; // UCrSaveGameUtils::SaveLastSaveGameName
+static constexpr size_t kSGI_Off_GameVersionLea   = 0x07BE; // LEA RCX, GameVersion::CurrentGameVersion_0
 
 // ==========================================================================
 // Function pointer typedefs
@@ -83,17 +81,18 @@ static constexpr size_t kSGI_Off_GameVersionLea   = 0x05AF; // LEA RCX, GameVers
 typedef void(__fastcall* SaveGameInternal_t)(void* self, FStringRaw* Name, bool bAsync);
 
 // FJsonObjectConverter::UStructToJsonObjectString
+// Resolved via separate AOB scan — no longer called from SaveGameInternal body.
+// Actual signature (confirmed from IDA):
+//   (UStruct*, const void*, FString*, __int64 CheckFlags, __int64 SkipFlags,
+//    int Indent, const TDelegate<...>* ExportCb, bool bPrettyPrint)
 typedef bool(__fastcall* UStructToJsonString_t)(
 	void* ScriptStruct, const void* StructPtr,
 	FStringRaw* OutJson,
 	int64_t CheckFlags, int64_t SkipFlags,
-	void* ExportCb, void* Unk, bool bPretty);
+	int Indent, void* ExportCb, bool bPrettyPrint);
 
 // FCrSaveGameData::StaticStruct()
 typedef void*(__fastcall* StaticStruct_t)();
-
-// FMemory::Free
-typedef void(__fastcall* FMemoryFree_t)(void* ptr);
 
 // FOnFlashlightDeactivated_DelegateWrapper — broadcasts a multicast delegate
 typedef void(__fastcall* BroadcastDelegate_t)(void* delegateField);
@@ -114,14 +113,17 @@ typedef void(__fastcall* FStringAssignRange_t)(FStringRaw* self, const wchar_t* 
 typedef void(__fastcall* SaveLastSaveGameName_t)(FStringRaw* name);
 
 // UCrSaveGameUtils::WriteMetaFile
-// (XMM0=worldTime, RDX=levelName, R8=saveName, R9=bIsInTutorial, stack=gameVersion, stack=world)
-typedef void(__fastcall* WriteMetaFile_t)(
+// Signature: WriteMetaFile(double,FString&,FString&,bool,FCrGameVersion const&,UWorld*,bool)
+// XMM0=worldTime, RDX=timestampStr (r15+0D0h), R8=saveName, R9=bIsInTutorial,
+// [rsp+20h]=gameVersion, [rsp+28h]=world, [rsp+30h]=bAsyncSave  (new 7th param)
+typedef bool(__fastcall* WriteMetaFile_t)(
 	double worldTime,
-	FStringRaw* levelName,
+	FStringRaw* timestampStr,
 	FStringRaw* saveName,
 	char bIsInTutorial,
 	const void* gameVersion,
-	void* world);
+	void* world,
+	bool bAsyncSave);
 
 // ISteamRemoteStorage — vtable confirmed from WriteUserFile assembly:
 //   slot 0  [rax+0x00] = FileWrite      (sync,  returns bool)
@@ -150,15 +152,14 @@ static HookHandle            g_hookHandle          = nullptr;
 static SaveGameInternal_t    g_originalSGI         = nullptr;
 static std::atomic<bool>     g_saveInProgress      { false };
 
-static UStructToJsonString_t g_uStructToJson          = nullptr;
-static StaticStruct_t        g_crSaveDataStaticStruct  = nullptr;
+static UStructToJsonString_t g_uStructToJson          = nullptr; // resolved via AOB scan
+static StaticStruct_t        g_crSaveDataStaticStruct  = nullptr; // resolved from SGI body
 static FStringRaw*           g_cloudSaveFolder         = nullptr;
 
 // Steam — resolved lazily at save time via SteamInternal_ContextInit
 static SteamContextInit_t    g_steamContextInit        = nullptr;
 static uintptr_t             g_steamContextAddr        = 0;    // s_CallbackCounterAndContext
 
-static FMemoryFree_t         g_fMemoryFree         = nullptr;
 static BroadcastDelegate_t   g_broadcastDelegate   = nullptr;
 static FDateTimeNow_t        g_dateTimeNow         = nullptr;
 static FDateTimeToString_t   g_dateTimeToString    = nullptr;
@@ -207,15 +208,13 @@ static std::string WideToUtf8(const wchar_t* str, int len)
 	return out;
 }
 
-// Safe wrapper: free a UE-allocated buffer via FMemory::Free if available,
-// else fall back to HeapFree (valid for UE5 Shipping on Windows).
+// Free a UE-allocated buffer via the modloader's Memory->Free().
 static void UEFree(void* ptr)
 {
 	if (!ptr) return;
-	if (g_fMemoryFree)
-		g_fMemoryFree(ptr);
-	else
-		HeapFree(GetProcessHeap(), 0, ptr);
+	auto* self = GetSelf();
+	if (self)
+		self->hooks->Memory->Free(ptr);
 }
 
 // ==========================================================================
@@ -252,8 +251,9 @@ static void RunSaveTask(SaveTask task)
 			&jsonStr,
 			0x1000000,  // CPF_SaveGame
 			0x2000,     // CPF_Transient
-			nullptr, nullptr,
-			false);
+			0,          // Indent
+			nullptr,    // ExportCb
+			false);     // bPrettyPrint
 
 		if (!jsonOk || !jsonStr.chars.data || jsonStr.chars.arrayNum <= 1)
 		{
@@ -467,12 +467,7 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 	if (g_broadcastDelegate)
 		g_broadcastDelegate(selfBytes + kOnPreSaveStartOffset);
 
-	// 2. GetWorld via vtable slot 0x30
-	void** const vtable = *reinterpret_cast<void***>(self);
-	typedef void*(__fastcall* GetWorld_t)(void*);
-	const GetWorld_t getWorldFn = reinterpret_cast<GetWorld_t>(vtable[kGetWorldVtableSlot]);
-	void* const world = getWorldFn(self);
-
+	void* const world = SDK::UWorld::GetWorld();
 	if (!world)
 	{
 		LOG_ERROR("BetterSaving: GetWorld() returned null — aborting save");
@@ -547,7 +542,8 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 			Name,
 			bIsInTutorial,
 			reinterpret_cast<const void*>(g_gameVersionAddr),
-			world);
+			world,
+			bAsync);
 
 		LOG_DEBUG("BetterSaving: WriteMetaFile called (tutorial=%d)", static_cast<int>(bIsInTutorial));
 	}
@@ -634,9 +630,8 @@ static uintptr_t ReadLeaRcxTarget(uintptr_t base, size_t off)
 
 static void InitFunctionPointers(uintptr_t sgiBase)
 {
-	const uintptr_t fmFree = ReadCallTarget(sgiBase, kSGI_Off_FMemoryFree);
-	g_fMemoryFree = reinterpret_cast<FMemoryFree_t>(fmFree);
-	LOG_INFO("BetterSaving: FMemory::Free         at 0x%llX", static_cast<unsigned long long>(fmFree));
+	// FMemoryFree: no longer resolved here — use modloader Memory->Free() instead.
+	// UStructToJsonObjectString: no longer in SGI body — resolved via AOB in Initialize().
 
 	const uintptr_t broadcast = ReadCallTarget(sgiBase, kSGI_Off_BroadcastPre);
 	g_broadcastDelegate = reinterpret_cast<BroadcastDelegate_t>(broadcast);
@@ -661,10 +656,6 @@ static void InitFunctionPointers(uintptr_t sgiBase)
 	const uintptr_t staticStruct = ReadCallTarget(sgiBase, kSGI_Off_StaticStruct);
 	g_crSaveDataStaticStruct = reinterpret_cast<StaticStruct_t>(staticStruct);
 	LOG_INFO("BetterSaving: FCrSaveGameData::StaticStruct at 0x%llX", static_cast<unsigned long long>(staticStruct));
-
-	const uintptr_t uStructJson = ReadCallTarget(sgiBase, kSGI_Off_UStructToJson);
-	g_uStructToJson = reinterpret_cast<UStructToJsonString_t>(uStructJson);
-	LOG_INFO("BetterSaving: UStructToJsonObjectString     at 0x%llX", static_cast<unsigned long long>(uStructJson));
 
 	const uintptr_t saveLastName = ReadCallTarget(sgiBase, kSGI_Off_SaveLastName);
 	g_saveLastSaveGameName = reinterpret_cast<SaveLastSaveGameName_t>(saveLastName);
@@ -803,7 +794,7 @@ namespace SaveHook
 
 		// Locate SaveGameInternal and hook it
 		static const char* kSGIPattern =
-			"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 33 DB 44 88 44 24";
+			"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 33 DB 48 89 55 ?? 33 C0";
 
 		const uintptr_t sgiAddr = self->scanner->FindPatternInMainModule(kSGIPattern);
 		if (!sgiAddr) { LOG_ERROR("BetterSaving: SaveGameInternal not found"); return false; }
@@ -812,11 +803,24 @@ namespace SaveHook
 		// Resolve all function pointers from the SGI body before hooking
 		InitFunctionPointers(sgiAddr);
 
-		if (!g_uStructToJson || !g_crSaveDataStaticStruct || !g_writeMetaFile)
+		if (!g_crSaveDataStaticStruct || !g_writeMetaFile)
 		{
-			LOG_ERROR("BetterSaving: JSON helpers or WriteMetaFile not resolved from SGI body");
+			LOG_ERROR("BetterSaving: StaticStruct or WriteMetaFile not resolved from SGI body");
 			return false;
 		}
+
+		// UStructToJsonObjectString is no longer called from SaveGameInternal (the game
+		// switched to UStructToJsonObject + FJsonSerializer).  Find it via its own pattern.
+		static const char* kUStructToJsonStringPattern =
+			"48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 4C 89 74 24 ?? 55 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 49 8B F9";
+		const uintptr_t uStructJsonAddr = self->scanner->FindPatternInMainModule(kUStructToJsonStringPattern);
+		if (!uStructJsonAddr)
+		{
+			LOG_ERROR("BetterSaving: UStructToJsonObjectString not found");
+			return false;
+		}
+		g_uStructToJson = reinterpret_cast<UStructToJsonString_t>(uStructJsonAddr);
+		LOG_INFO("BetterSaving: UStructToJsonObjectString at 0x%llX", static_cast<unsigned long long>(uStructJsonAddr));
 
 		g_hookHandle = self->hooks->Hooks->Install(
 			sgiAddr,
