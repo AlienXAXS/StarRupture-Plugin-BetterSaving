@@ -30,37 +30,47 @@ struct FTArrayRaw
 struct FStringRaw  { FTArrayRaw chars; };
 struct FDateTimeRaw { int64_t ticks; };   // FDateTime is just a Ticks int64
 
-// FCrSaveGameData lives at UCrSaveSubsystem+0x30, size 0xC0.
-static constexpr size_t    kSaveDataSize   = 0xC0;
-static constexpr ptrdiff_t kSaveDataOffset = 0x30;
+// FCrSaveGameData lives at UCrSaveSubsystem::SaveData, sized to match.
+// Both derived from the Dumper7 SDK (Chimera_classes.hpp / Chimera_structs.hpp)
+// so they stay correct across game updates without manual IDA checks.
+static constexpr size_t    kSaveDataSize   = sizeof(SDK::FCrSaveGameData);
+static constexpr ptrdiff_t kSaveDataOffset = offsetof(SDK::UCrSaveSubsystem, SaveData);
 
 // ==========================================================================
 // UCrSaveSubsystem field offsets  (all relative to the 'this' pointer)
-// Derived from IDA assembly listing of SaveGameInternal @ 0x1475C4AF0.
+// Derived from the SDK where possible (auto-updates across game updates).
 // ==========================================================================
 
 // Delegate fields
-static constexpr ptrdiff_t kOnPreSaveStartOffset = 0x110; // lea rcx,[r15+110h]
-static constexpr ptrdiff_t kOnAfterSaveOffset    = 0x188; // lea rcx,[r15+188h]
+static constexpr ptrdiff_t kOnPreSaveStartOffset = offsetof(SDK::UCrSaveSubsystem, OnPreSaveStart);
+static constexpr ptrdiff_t kOnAfterSaveOffset    = offsetof(SDK::UCrSaveSubsystem, OnAfterSave);
 
-// SaveData field offsets within UCrSaveSubsystem (= SaveData-relative + 0x30)
-static constexpr ptrdiff_t kSaveDataLevelOffset         = 0x80;  // FString Level
-static constexpr ptrdiff_t kSaveDataWorldTimeOffset     = 0x90;  // double WorldTimeSeconds
-static constexpr ptrdiff_t kSaveDataWorldUnpausedOffset = 0x98;  // double WorldUnpausedTimeSeconds
-static constexpr ptrdiff_t kSaveDataWorldRealOffset     = 0xA0;  // double WorldRealTimeSeconds
-static constexpr ptrdiff_t kSaveDataWorldAudioOffset    = 0xA8;  // double WorldAudioTimeSeconds
-static constexpr ptrdiff_t kSaveDataTimeStampOffset     = 0xD0;  // FString TimeStamp
-static constexpr ptrdiff_t kSaveDataGameVersionOffset   = 0xE0;  // FCrGameVersion (12 bytes)
-static constexpr size_t    kGameVersionSize             = 12;    // Major(4)+Minor(4)+Patch(4)
+// SaveData field offsets within UCrSaveSubsystem (= SaveData-relative + kSaveDataOffset)
+static constexpr ptrdiff_t kSaveDataLevelOffset         = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, Level);
+static constexpr ptrdiff_t kSaveDataWorldTimeOffset     = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldTimeSeconds);
+static constexpr ptrdiff_t kSaveDataWorldUnpausedOffset = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldUnpausedTimeSeconds);
+static constexpr ptrdiff_t kSaveDataWorldRealOffset     = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldRealTimeSeconds);
+static constexpr ptrdiff_t kSaveDataWorldAudioOffset    = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldAudioTimeSeconds);
+static constexpr ptrdiff_t kSaveDataTimeStampOffset     = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, Timestamp);
+static constexpr ptrdiff_t kSaveDataGameVersionOffset   = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, GameVersion);
+static constexpr size_t    kGameVersionSize             = sizeof(SDK::FCrGameVersion);
 
 // UWorld field offsets
+// NOTE: these UWorld time fields are private engine internals, not reflected
+// by Dumper7 — they must be re-verified via IDA after game updates.
 static constexpr ptrdiff_t kWorldTimeSecondsOffset         = 0x838;
 static constexpr ptrdiff_t kWorldUnpausedTimeSecondsOffset = 0x840;
 static constexpr ptrdiff_t kWorldRealTimeSecondsOffset     = 0x848;
 static constexpr ptrdiff_t kWorldAudioTimeSecondsOffset    = 0x850;
 
+// SDK-derived: UWorld::GameState
+static constexpr ptrdiff_t kWorldGameStateOffset = offsetof(SDK::UWorld, GameState);
+
 // Offsets of specific CALL / LEA instructions within SaveGameInternal body
 // (instruction address - function base 0x1475C4AF0)
+// NOTE: SaveGameInternal is a private native function with no SDK reflection —
+// these offsets (and the AOB patterns in Initialize()) must be re-verified
+// via IDA after game updates.
 // NOTE: FMemoryFree removed — use modloader Memory->Free() instead.
 // NOTE: UStructToJson removed from SGI body — 0x359 now points to UStructToJsonObject
 //       (wrong function/ABI). UStructToJsonObjectString resolved via separate AOB scan.
@@ -531,8 +541,7 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 	{
 		const double worldTime = *reinterpret_cast<const double*>(worldBytes + kWorldTimeSecondsOffset);
 
-		// Get ACrGameStateBase from UWorld::GameState (offset 0x1B0) and query tutorial state
-		static constexpr ptrdiff_t kWorldGameStateOffset = 0x1B0;
+		// Get ACrGameStateBase from UWorld::GameState and query tutorial state
 		auto* gameState = *reinterpret_cast<SDK::ACrGameStateBase* const*>(worldBytes + kWorldGameStateOffset);
 		const char bIsInTutorial = (gameState && gameState->IsInTutorial()) ? 1 : 0;
 
