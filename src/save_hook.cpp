@@ -682,6 +682,34 @@ static void InitFunctionPointers(uintptr_t sgiBase)
 // (0x14774DD0D - 0x14774D710 = 0x5FD)
 static constexpr size_t kWUF_Off_SteamContext = 0x5FD;
 
+// ==========================================================================
+// AOB patterns -- resolved once, from OnPluginLoadHooks
+// ==========================================================================
+
+static constexpr const char* kFPathsPattern = "4C 89 74 24 ?? 55 48 8B EC 48 83 EC ?? E8";
+
+#ifdef MODLOADER_SERVER_BUILD
+static constexpr const char* kWritePattern =
+	"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 65 48 8B 04 25 ?? ?? ?? ?? 33 F6";
+#else
+static constexpr const char* kWritePattern =
+	"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 65 48 8B 04 25 ?? ?? ?? ?? 33 F6";
+#endif
+
+static constexpr const char* kSGIPattern =
+	"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 33 DB 48 89 55 ?? 33 C0";
+
+// UStructToJsonObjectString is no longer called from SaveGameInternal (the game
+// switched to UStructToJsonObject + FJsonSerializer), so it needs its own pattern.
+static constexpr const char* kUStructToJsonStringPattern =
+	"48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 4C 89 74 24 ?? 55 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 49 8B F9";
+
+// Filled in by SaveHook::ResolvePatterns during OnPluginLoadHooks.
+static uintptr_t g_addrFPaths        = 0;
+static uintptr_t g_addrWriteUserFile = 0;
+static uintptr_t g_addrSaveGameInternal = 0;
+static uintptr_t g_addrUStructToJson = 0;
+
 static void InitSteam(uintptr_t wufAddr)
 {
 	const HMODULE hSteam = GetModuleHandleW(L"steam_api64.dll");
@@ -721,9 +749,8 @@ static void InitCloudSaveFolder(uintptr_t writeUserFileAddr)
 	auto* self = GetSelf();
 	if (!self) return;
 
-	static const char* kFPathsPattern = "4C 89 74 24 ?? 55 48 8B EC 48 83 EC ?? E8";
-	const uintptr_t fPathsAddr = self->scanner->FindPatternInMainModule(kFPathsPattern);
-	if (!fPathsAddr) { LOG_WARN("BetterSaving: FPaths::ProjectSavedDir not found"); return; }
+	const uintptr_t fPathsAddr = g_addrFPaths;
+	if (!fPathsAddr) { LOG_WARN("BetterSaving: FPaths::ProjectSavedDir unresolved"); return; }
 
 	size_t fPathsOffset = 0;
 	for (size_t i = 0; i < kScan - 5; ++i)
@@ -770,6 +797,24 @@ static void InitCloudSaveFolder(uintptr_t writeUserFileAddr)
 namespace SaveHook
 {
 
+	void ResolvePatterns(IPluginSelf* self, IPluginHookScanner* scanner)
+	{
+		if (!self || !scanner)
+			return;
+
+		// Required: BetterSaving's whole job is writing the save. PluginInit
+		// already refused to load without these, so let the loader say so
+		// properly instead of failing silently at init.
+		g_addrFPaths = scanner->ResolveRequired(
+			self, "FPaths::ProjectSavedDir", kFPathsPattern);
+		g_addrWriteUserFile = scanner->ResolveRequired(
+			self, "UCrSaveGameUtils::WriteUserFile", kWritePattern);
+		g_addrSaveGameInternal = scanner->ResolveRequired(
+			self, "UCrSaveGameUtils::SaveGameInternal", kSGIPattern);
+		g_addrUStructToJson = scanner->ResolveRequired(
+			self, "UStructToJsonObjectString", kUStructToJsonStringPattern);
+	}
+
 	bool Initialize()
 	{
 		LOG_DEBUG("BetterSaving: SaveHook::Initialize");
@@ -777,18 +822,9 @@ namespace SaveHook
 		auto* self = GetSelf();
 		if (!self) { LOG_ERROR("BetterSaving: GetSelf() null"); return false; }
 
-		// Locate WriteUserFile for CloudSaveFolder + Steam context
-#ifdef MODLOADER_SERVER_BUILD
-		static const char* kWritePattern =
-			"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 65 48 8B 04 25 ?? ?? ?? ?? 33 F6";
-#else
-		static const char* kWritePattern =
-			"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 65 48 8B 04 25 ?? ?? ?? ?? 33 F6";
-#endif
-		
-
-		const uintptr_t wufAddr = self->scanner->FindPatternInMainModule(kWritePattern);
-		if (!wufAddr) { LOG_ERROR("BetterSaving: WriteUserFile not found"); return false; }
+		// WriteUserFile anchors both CloudSaveFolder and the Steam context
+		const uintptr_t wufAddr = g_addrWriteUserFile;
+		if (!wufAddr) { LOG_ERROR("BetterSaving: WriteUserFile unresolved"); return false; }
 		LOG_INFO("BetterSaving: WriteUserFile at 0x%llX", static_cast<unsigned long long>(wufAddr));
 
 		InitCloudSaveFolder(wufAddr);
@@ -801,12 +837,8 @@ namespace SaveHook
 			return false;
 		}
 
-		// Locate SaveGameInternal and hook it
-		static const char* kSGIPattern =
-			"48 89 5C 24 ?? 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 ?? ?? ?? ?? 33 DB 48 89 55 ?? 33 C0";
-
-		const uintptr_t sgiAddr = self->scanner->FindPatternInMainModule(kSGIPattern);
-		if (!sgiAddr) { LOG_ERROR("BetterSaving: SaveGameInternal not found"); return false; }
+		const uintptr_t sgiAddr = g_addrSaveGameInternal;
+		if (!sgiAddr) { LOG_ERROR("BetterSaving: SaveGameInternal unresolved"); return false; }
 		LOG_INFO("BetterSaving: SaveGameInternal at 0x%llX", static_cast<unsigned long long>(sgiAddr));
 
 		// Resolve all function pointers from the SGI body before hooking
@@ -818,14 +850,10 @@ namespace SaveHook
 			return false;
 		}
 
-		// UStructToJsonObjectString is no longer called from SaveGameInternal (the game
-		// switched to UStructToJsonObject + FJsonSerializer).  Find it via its own pattern.
-		static const char* kUStructToJsonStringPattern =
-			"48 89 5C 24 ?? 48 89 74 24 ?? 48 89 7C 24 ?? 4C 89 74 24 ?? 55 48 8D 6C 24 ?? 48 81 EC ?? ?? ?? ?? 49 8B F9";
-		const uintptr_t uStructJsonAddr = self->scanner->FindPatternInMainModule(kUStructToJsonStringPattern);
+		const uintptr_t uStructJsonAddr = g_addrUStructToJson;
 		if (!uStructJsonAddr)
 		{
-			LOG_ERROR("BetterSaving: UStructToJsonObjectString not found");
+			LOG_ERROR("BetterSaving: UStructToJsonObjectString unresolved");
 			return false;
 		}
 		g_uStructToJson = reinterpret_cast<UStructToJsonString_t>(uStructJsonAddr);
