@@ -796,6 +796,22 @@ static void InitCloudSaveFolder(uintptr_t writeUserFileAddr)
 
 namespace SaveHook
 {
+	namespace
+	{
+		// Required rather than optional: every one of these is load-bearing, and
+		// the label is all that separates the two anyway -- a miss refuses the
+		// plugin either way.
+		uintptr_t ResolveFunction(IPluginSelf* self, IPluginHookScanner* scanner,
+			const char* hookName, const char* pattern)
+		{
+			PluginScanRequest req = PLUGIN_SCAN_REQUEST_INIT;
+			req.hookName = hookName;
+			req.pattern  = pattern;
+			req.kind     = PLUGIN_SCAN_FUNCTION_START;
+
+			return scanner->Resolve(self, &req);
+		}
+	}
 
 	void ResolvePatterns(IPluginSelf* self, IPluginHookScanner* scanner)
 	{
@@ -805,14 +821,21 @@ namespace SaveHook
 		// Required: BetterSaving's whole job is writing the save. PluginInit
 		// already refused to load without these, so let the loader say so
 		// properly instead of failing silently at init.
-		g_addrFPaths = scanner->ResolveRequired(
-			self, "FPaths::ProjectSavedDir", kFPathsPattern);
-		g_addrWriteUserFile = scanner->ResolveRequired(
-			self, "UCrSaveGameUtils::WriteUserFile", kWritePattern);
-		g_addrSaveGameInternal = scanner->ResolveRequired(
-			self, "UCrSaveGameUtils::SaveGameInternal", kSGIPattern);
-		g_addrUStructToJson = scanner->ResolveRequired(
-			self, "UStructToJsonObjectString", kUStructToJsonStringPattern);
+		//
+		// All four are function entries -- two are detoured, two are called --
+		// so each declares FUNCTION_START and the loader checks the match
+		// against the exception directory rather than trusting the prologue
+		// bytes. These prologues are common shapes (48 89 5C 24 ?? 55 56 57 ...),
+		// which is exactly the case where a pattern can match plausible bytes in
+		// the wrong place.
+		g_addrFPaths = ResolveFunction(self, scanner,
+			"FPaths::ProjectSavedDir", kFPathsPattern);
+		g_addrWriteUserFile = ResolveFunction(self, scanner,
+			"UCrSaveGameUtils::WriteUserFile", kWritePattern);
+		g_addrSaveGameInternal = ResolveFunction(self, scanner,
+			"UCrSaveGameUtils::SaveGameInternal", kSGIPattern);
+		g_addrUStructToJson = ResolveFunction(self, scanner,
+			"UStructToJsonObjectString", kUStructToJsonStringPattern);
 	}
 
 	bool Initialize()
