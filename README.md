@@ -1,5 +1,7 @@
 # BetterSaving -- StarRupture Plugin
 
+> **Deprecated.** StarRupture now covers what this plugin did, so it is no longer maintained and does not load on the current game build. The source stays here for reference.
+
 Replaces the default blocking save system in [StarRupture](https://store.steampowered.com/app/1631270/StarRupture/) with an asynchronous pipeline that moves JSON serialisation, compression, and Steam Cloud I/O off the game thread, eliminating save-induced frame hitches.
 
 **Target:** Game client and server
