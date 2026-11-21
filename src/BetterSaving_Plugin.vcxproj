@@ -297,6 +297,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="bettersaving_fields.h" />
     <ClInclude Include="miniz.h" />
     <ClInclude Include="plugin.h" />
     <ClInclude Include="plugin_config.h" />

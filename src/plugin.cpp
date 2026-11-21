@@ -1,6 +1,7 @@
 #include "plugin.h"
 #include "plugin_helpers.h"
 #include "plugin_config.h"
+#include "bettersaving_fields.h"
 #include "save_hook.h"
 #include "save_widget.h"
 
@@ -28,7 +29,11 @@ static PluginInfo s_pluginInfo = {
 	PLUGIN_TARGET_SERVER,
 #endif
 	PLUGIN_GAME_BUILT_CL,
-	0   // mapFlags: not on the version object map yet
+#ifdef MODLOADER_SERVER_BUILD
+	PLUGIN_MAP_MIGRATED
+#else
+	0   // mapFlags: the client build is not on the version object map yet
+#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -86,11 +91,22 @@ extern "C" {
 	__declspec(dllexport) void OnPluginLoadHooks(IPluginSelf* self, IPluginHookScanner* scanner)
 	{
 		g_self = self;
+
+		// The game members the plugin reads, from the loader's version object map
+		// for the running build. A miss is recorded with the loader, which
+		// refuses the plugin.
+		BetterSavingFields::Resolve(self, scanner);
 		SaveHook::ResolvePatterns(self, scanner);
 	}
 
 	__declspec(dllexport) bool PluginInit(IPluginSelf* self)
 	{
+#ifdef MODLOADER_SERVER_BUILD
+		// First, before any early return: off its game build the loader refuses a
+		// migrated plugin whose PluginInit did not ask for the Game-SDK globals.
+		PluginSdkRuntime::Init(self->hooks);
+#endif
+
 		g_self = self;
 
 		LOG_INFO("BetterSaving plugin initializing...");

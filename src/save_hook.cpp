@@ -3,6 +3,7 @@
 #include "save_widget.h"
 #include "plugin_helpers.h"
 #include "plugin_config.h"
+#include "bettersaving_fields.h"
 
 #include "Chimera_classes.hpp"
 #include "miniz.h"
@@ -16,55 +17,16 @@
 #include <cstdint>
 #include <limits>
 
+namespace Fields = BetterSavingFields;
+
 // ==========================================================================
 // UE5 layout mirrors
 // ==========================================================================
 
-struct FTArrayRaw
-{
-	void*   data;
-	int32_t arrayNum;
-	int32_t arrayMax;
-};
-
-struct FStringRaw  { FTArrayRaw chars; };
+// FTArrayRaw and FStringRaw are in bettersaving_fields.h, with the game members
+// the plugin reads (the save data, the world's clocks), which that header
+// resolves through the loader.
 struct FDateTimeRaw { int64_t ticks; };   // FDateTime is just a Ticks int64
-
-// FCrSaveGameData lives at UCrSaveSubsystem::SaveData, sized to match.
-// Both derived from the Dumper7 SDK (Chimera_classes.hpp / Chimera_structs.hpp)
-// so they stay correct across game updates without manual IDA checks.
-static constexpr size_t    kSaveDataSize   = sizeof(SDK::FCrSaveGameData);
-static constexpr ptrdiff_t kSaveDataOffset = offsetof(SDK::UCrSaveSubsystem, SaveData);
-
-// ==========================================================================
-// UCrSaveSubsystem field offsets  (all relative to the 'this' pointer)
-// Derived from the SDK where possible (auto-updates across game updates).
-// ==========================================================================
-
-// Delegate fields
-static constexpr ptrdiff_t kOnPreSaveStartOffset = offsetof(SDK::UCrSaveSubsystem, OnPreSaveStart);
-static constexpr ptrdiff_t kOnAfterSaveOffset    = offsetof(SDK::UCrSaveSubsystem, OnAfterSave);
-
-// SaveData field offsets within UCrSaveSubsystem (= SaveData-relative + kSaveDataOffset)
-static constexpr ptrdiff_t kSaveDataLevelOffset         = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, Level);
-static constexpr ptrdiff_t kSaveDataWorldTimeOffset     = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldTimeSeconds);
-static constexpr ptrdiff_t kSaveDataWorldUnpausedOffset = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldUnpausedTimeSeconds);
-static constexpr ptrdiff_t kSaveDataWorldRealOffset     = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldRealTimeSeconds);
-static constexpr ptrdiff_t kSaveDataWorldAudioOffset    = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, WorldAudioTimeSeconds);
-static constexpr ptrdiff_t kSaveDataTimeStampOffset     = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, Timestamp);
-static constexpr ptrdiff_t kSaveDataGameVersionOffset   = kSaveDataOffset + offsetof(SDK::FCrSaveGameData, GameVersion);
-static constexpr size_t    kGameVersionSize             = sizeof(SDK::FCrGameVersion);
-
-// UWorld field offsets
-// NOTE: these UWorld time fields are private engine internals, not reflected
-// by Dumper7 — they must be re-verified via IDA after game updates.
-static constexpr ptrdiff_t kWorldTimeSecondsOffset         = 0x838;
-static constexpr ptrdiff_t kWorldUnpausedTimeSecondsOffset = 0x840;
-static constexpr ptrdiff_t kWorldRealTimeSecondsOffset     = 0x848;
-static constexpr ptrdiff_t kWorldAudioTimeSecondsOffset    = 0x850;
-
-// SDK-derived: UWorld::GameState
-static constexpr ptrdiff_t kWorldGameStateOffset = offsetof(SDK::UWorld, GameState);
 
 // Offsets of specific CALL / LEA instructions within SaveGameInternal body
 // (instruction address - function base 0x1475C4AF0)
@@ -164,7 +126,7 @@ static std::atomic<bool>     g_saveInProgress      { false };
 
 static UStructToJsonString_t g_uStructToJson          = nullptr; // resolved via AOB scan
 static StaticStruct_t        g_crSaveDataStaticStruct  = nullptr; // resolved from SGI body
-static FStringRaw*           g_cloudSaveFolder         = nullptr;
+static SDK::FString*         g_cloudSaveFolder         = nullptr;
 
 // Steam — resolved lazily at save time via SteamInternal_ContextInit
 static SteamContextInit_t    g_steamContextInit        = nullptr;
@@ -185,7 +147,7 @@ static uintptr_t             g_gameVersionAddr     = 0;
 
 struct SaveTask
 {
-	uint8_t      saveDataRaw[kSaveDataSize]; // snapshot of FCrSaveGameData (post-metadata update)
+	std::vector<uint8_t> saveDataRaw;        // snapshot of FCrSaveGameData (post-metadata update)
 	std::wstring slotName;
 	void*        subsystemSelf;              // for OnAfterSave (game thread marshal TODO)
 };
@@ -201,7 +163,7 @@ static ISteamRemoteStorage_Minimal* GetSteamStorage()
 	if (!g_steamContextInit || !g_steamContextAddr) return nullptr;
 	void* result = g_steamContextInit(reinterpret_cast<void*>(g_steamContextAddr));
 	if (!result) return nullptr;
-	return *reinterpret_cast<ISteamRemoteStorage_Minimal**>(result);
+	return *static_cast<ISteamRemoteStorage_Minimal**>(result);
 }
 
 // ==========================================================================
@@ -257,7 +219,7 @@ static void RunSaveTask(SaveTask task)
 		FStringRaw jsonStr{};
 		const bool jsonOk = g_uStructToJson(
 			scriptStruct,
-			task.saveDataRaw,
+			task.saveDataRaw.data(),
 			&jsonStr,
 			0x1000000,  // CPF_SaveGame
 			0x2000,     // CPF_Transient
@@ -352,7 +314,7 @@ static void RunSaveTask(SaveTask task)
 		SaveWidget::SetStage(SaveStage::Writing);
 
 		LOG_INFO("BetterSaving: [3/4] Checking CloudSaveFolder...");
-		if (!g_cloudSaveFolder || !g_cloudSaveFolder->chars.data || g_cloudSaveFolder->chars.arrayNum <= 1)
+		if (!g_cloudSaveFolder || !g_cloudSaveFolder->GetDataPtr() || g_cloudSaveFolder->Num() <= 1)
 		{
 			LOG_ERROR("BetterSaving: [3/4] FAILED — CloudSaveFolder not readable");
 			goto Fail;
@@ -368,9 +330,8 @@ static void RunSaveTask(SaveTask task)
 			}
 			LOG_INFO("BetterSaving: [3/4] ISteamRemoteStorage OK (0x%p)", static_cast<void*>(steam));
 
-			const int folderLen = g_cloudSaveFolder->chars.arrayNum - 1;
-			const std::string folderUtf8 = WideToUtf8(
-				static_cast<const wchar_t*>(g_cloudSaveFolder->chars.data), folderLen);
+			const int folderLen = g_cloudSaveFolder->Num() - 1;
+			const std::string folderUtf8 = WideToUtf8(g_cloudSaveFolder->GetDataPtr(), folderLen);
 			const std::string slotUtf8 = WideToUtf8(task.slotName.c_str(),
 				static_cast<int>(task.slotName.size()));
 			const std::string steamPath = folderUtf8 + slotUtf8 + ".sav";
@@ -466,7 +427,8 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 		return;
 	}
 
-	uint8_t* const selfBytes = reinterpret_cast<uint8_t*>(self);
+	// The save data sits inside the subsystem; each member below is found from it.
+	void* const saveData = Fields::SubsystemSaveData.In(self);
 
 	// ------------------------------------------------------------------
 	// Game-thread phase: update SaveData metadata fields
@@ -475,17 +437,15 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 
 	// 1. Fire OnPreSaveStart delegate
 	if (g_broadcastDelegate)
-		g_broadcastDelegate(selfBytes + kOnPreSaveStartOffset);
+		g_broadcastDelegate(Fields::SubsystemOnPreSaveStart.In(self));
 
-	void* const world = SDK::UWorld::GetWorld();
+	void* const world = PluginSdkRuntime::GetWorld();
 	if (!world)
 	{
 		LOG_ERROR("BetterSaving: GetWorld() returned null — aborting save");
 		g_saveInProgress.store(false, std::memory_order_release);
 		return;
 	}
-
-	const uint8_t* const worldBytes = reinterpret_cast<const uint8_t*>(world);
 
 	// 3. Update SaveData.Level from current level path
 	if (g_getPathName && g_fStringAssignRange)
@@ -495,21 +455,17 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 
 		const int32_t len = (levelName.chars.arrayNum > 0) ? (levelName.chars.arrayNum - 1) : 0;
 		g_fStringAssignRange(
-			reinterpret_cast<FStringRaw*>(selfBytes + kSaveDataLevelOffset),
+			Fields::SaveDataLevel.In(saveData),
 			static_cast<const wchar_t*>(levelName.chars.data), len);
 
 		UEFree(levelName.chars.data);
 	}
 
 	// 4. Update world time fields
-	*reinterpret_cast<double*>(selfBytes + kSaveDataWorldTimeOffset) =
-		*reinterpret_cast<const double*>(worldBytes + kWorldTimeSecondsOffset);
-	*reinterpret_cast<double*>(selfBytes + kSaveDataWorldUnpausedOffset) =
-		*reinterpret_cast<const double*>(worldBytes + kWorldUnpausedTimeSecondsOffset);
-	*reinterpret_cast<double*>(selfBytes + kSaveDataWorldRealOffset) =
-		*reinterpret_cast<const double*>(worldBytes + kWorldRealTimeSecondsOffset);
-	*reinterpret_cast<double*>(selfBytes + kSaveDataWorldAudioOffset) =
-		*reinterpret_cast<const double*>(worldBytes + kWorldAudioTimeSecondsOffset);
+	*Fields::SaveDataWorldTime.In(saveData)     = *Fields::WorldTimeSeconds.In(world);
+	*Fields::SaveDataWorldUnpaused.In(saveData) = *Fields::WorldUnpausedTimeSeconds.In(world);
+	*Fields::SaveDataWorldReal.In(saveData)     = *Fields::WorldRealTimeSeconds.In(world);
+	*Fields::SaveDataWorldAudio.In(saveData)    = *Fields::WorldAudioTimeSeconds.In(world);
 
 	// 5. Update TimeStamp via FDateTime::Now + ToString
 	if (g_dateTimeNow && g_dateTimeToString && g_fStringAssignRange)
@@ -522,7 +478,7 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 
 		const int32_t tsLen = (tsResult.chars.arrayNum > 0) ? (tsResult.chars.arrayNum - 1) : 0;
 		g_fStringAssignRange(
-			reinterpret_cast<FStringRaw*>(selfBytes + kSaveDataTimeStampOffset),
+			Fields::SaveDataTimestamp.In(saveData),
 			static_cast<const wchar_t*>(tsResult.chars.data), tsLen);
 
 		UEFree(tsResult.chars.data);
@@ -531,23 +487,23 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 	// 6. Update GameVersion from static
 	if (g_gameVersionAddr)
 	{
-		memcpy(selfBytes + kSaveDataGameVersionOffset,
+		memcpy(Fields::SaveDataGameVersion.In(saveData),
 			reinterpret_cast<const void*>(g_gameVersionAddr),
-			kGameVersionSize);
+			Fields::GameVersionSize.resolvedSize);
 	}
 
 	// 7. Write meta file (game thread — mirrors what SaveGameInternal does before JSON)
 	if (g_writeMetaFile)
 	{
-		const double worldTime = *reinterpret_cast<const double*>(worldBytes + kWorldTimeSecondsOffset);
+		const double worldTime = *Fields::WorldTimeSeconds.In(world);
 
 		// Get ACrGameStateBase from UWorld::GameState and query tutorial state
-		auto* gameState = *reinterpret_cast<SDK::ACrGameStateBase* const*>(worldBytes + kWorldGameStateOffset);
+		auto* gameState = static_cast<SDK::ACrGameStateBase*>(*Fields::WorldGameState.In(world));
 		const char bIsInTutorial = (gameState && gameState->IsInTutorial()) ? 1 : 0;
 
 		g_writeMetaFile(
 			worldTime,
-			reinterpret_cast<FStringRaw*>(selfBytes + kSaveDataTimeStampOffset),
+			Fields::SaveDataTimestamp.In(saveData),
 			Name,
 			bIsInTutorial,
 			reinterpret_cast<const void*>(g_gameVersionAddr),
@@ -559,7 +515,8 @@ static void __fastcall Detour_SaveGameInternal(void* self, FStringRaw* Name, boo
 
 	// 8. Snapshot SaveData — background thread takes it from here
 	SaveTask task{};
-	memcpy(task.saveDataRaw, selfBytes + kSaveDataOffset, kSaveDataSize);
+	const uint8_t* const saveDataBytes = static_cast<const uint8_t*>(saveData);
+	task.saveDataRaw.assign(saveDataBytes, saveDataBytes + Fields::SaveDataSize.resolvedSize);
 	task.subsystemSelf = self;
 
 	if (Name && Name->chars.data && Name->chars.arrayNum > 1)
@@ -781,7 +738,7 @@ static void InitCloudSaveFolder(uintptr_t writeUserFileAddr)
 			if (code[j] == 0xE8) { hasCall = true; break; }
 		if (!hasCall) continue;
 
-		g_cloudSaveFolder = reinterpret_cast<FStringRaw*>(addr);
+		g_cloudSaveFolder = reinterpret_cast<SDK::FString*>(addr);
 		LOG_INFO("BetterSaving: CloudSaveFolder at 0x%llX (arrayNum=%d)",
 			static_cast<unsigned long long>(addr), arrayNum);
 		break;
@@ -804,12 +761,17 @@ namespace SaveHook
 		uintptr_t ResolveFunction(IPluginSelf* self, IPluginHookScanner* scanner,
 			const char* hookName, const char* pattern)
 		{
+#ifdef MODLOADER_SERVER_BUILD
+			// The loader's version object map first, then this plugin's own pattern.
+			return PluginMap::Function(scanner, self, hookName, pattern);
+#else
 			PluginScanRequest req = PLUGIN_SCAN_REQUEST_INIT;
 			req.hookName = hookName;
 			req.pattern  = pattern;
 			req.kind     = PLUGIN_SCAN_FUNCTION_START;
 
 			return scanner->Resolve(self, &req);
+#endif
 		}
 	}
 
@@ -829,13 +791,13 @@ namespace SaveHook
 		// which is exactly the case where a pattern can match plausible bytes in
 		// the wrong place.
 		g_addrFPaths = ResolveFunction(self, scanner,
-			"FPaths::ProjectSavedDir", kFPathsPattern);
+			Fields::ProjectSavedDir, kFPathsPattern);
 		g_addrWriteUserFile = ResolveFunction(self, scanner,
-			"UCrSaveGameUtils::WriteUserFile", kWritePattern);
+			Fields::WriteUserFile, kWritePattern);
 		g_addrSaveGameInternal = ResolveFunction(self, scanner,
-			"UCrSaveGameUtils::SaveGameInternal", kSGIPattern);
+			Fields::SaveGameInternal, kSGIPattern);
 		g_addrUStructToJson = ResolveFunction(self, scanner,
-			"UStructToJsonObjectString", kUStructToJsonStringPattern);
+			Fields::UStructToJsonObjectString, kUStructToJsonStringPattern);
 	}
 
 	bool Initialize()
