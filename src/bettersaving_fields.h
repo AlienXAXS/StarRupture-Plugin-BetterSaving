@@ -44,9 +44,9 @@ struct FStringRaw  { FTArrayRaw chars; };
 namespace BetterSavingFields
 {
 	// The functions the plugin hooks or calls, under the game's own names, the
-	// same key for every plugin. On the server the loader's map holds rows for
-	// ProjectSavedDir and UStructToJsonObjectString; the other two are found by
-	// the plugin's own pattern.
+	// same key for every plugin. The loader's map answers one when it has a row
+	// for the running build; until then, and for the two it has no row for, the
+	// plugin's own pattern (save_hook.cpp) finds it.
 	inline constexpr const char* ProjectSavedDir            = "FPaths::ProjectSavedDir";
 	inline constexpr const char* WriteUserFile              = "UCrSaveGameUtils::WriteUserFile";
 	inline constexpr const char* SaveGameInternal           = "UCrSaveGameUtils::SaveGameInternal";
