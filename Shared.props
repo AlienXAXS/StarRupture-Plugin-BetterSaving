@@ -67,4 +67,20 @@
     </Link>
   </ItemDefinitionGroup>
 
+  <!-- ============================================================
+       PLUGIN_GAME_BUILT_CL
+       The game build (CL) of the Game-SDK headers the plugin compiles
+       against: the Client SDK is 130045, the Server SDK 127004. Pinned
+       here; a build passes /p:PluginGameBuiltCL=<CL> to override it.
+       PluginGameBuild.props (Plugin SDK) reads the headers' own
+       build_cl.txt and turns it into the define that plugin_interface.h
+       stores in PluginInfo::gameBuiltCL.
+       ============================================================ -->
+  <PropertyGroup>
+    <PluginGameBuiltCL Condition="'$(PluginGameBuiltCL)' == '' And $(Configuration.Contains('Client'))">130045</PluginGameBuiltCL>
+    <PluginGameBuiltCL Condition="'$(PluginGameBuiltCL)' == ''">127004</PluginGameBuiltCL>
+  </PropertyGroup>
+  <Import Project="$(PluginSDKInclude)\..\PluginGameBuild.props"
+          Condition="Exists('$(PluginSDKInclude)\..\PluginGameBuild.props')" />
+
 </Project>

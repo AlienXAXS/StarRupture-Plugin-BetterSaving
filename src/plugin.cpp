@@ -23,10 +23,12 @@ static PluginInfo s_pluginInfo = {
 #endif
 	PLUGIN_INTERFACE_VERSION,
 #ifdef MODLOADER_CLIENT_BUILD
-	PLUGIN_TARGET_CLIENT
+	PLUGIN_TARGET_CLIENT,
 #else
-	PLUGIN_TARGET_SERVER
+	PLUGIN_TARGET_SERVER,
 #endif
+	PLUGIN_GAME_BUILT_CL,
+	0   // mapFlags: not on the version object map yet
 };
 
 // ---------------------------------------------------------------------------
